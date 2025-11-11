@@ -1,0 +1,28 @@
+# AL Language build artifacts
+*.app
+*.alc
+*.alpackages
+
+# Visual Studio Code
+.vscode/
+*.code-workspace
+
+# Build output
+bin/
+obj/
+
+# Temporary files
+*.tmp
+*.log
+*.bak
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# User-specific files
+*.user
+*.suo
+

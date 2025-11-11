@@ -1,0 +1,30 @@
+{
+  "id": "8d2370ba-d26c-4ea6-9999-6cbe5fcc89bc",
+  "name": "Added Order Date",
+  "publisher": "Shreya Deshmukh",
+  "version": "1.1.0.7",
+  "runtime": "14.0",
+  "target": "Cloud",
+  "platform": "1.0.0.0",
+  "application": "25.0.0.0",
+  "resourceExposurePolicy": {
+    "allowDebugging": true,
+    "allowDownloadingSource": true,
+    "includeSourceInSymbolFile": true,
+    "applyToDevExtension": false
+  },
+  "dependencies": [
+    {
+      "id": "437dbf0e-84ff-417a-965d-ed2bb9650972",
+      "name": "Base Application",
+      "version": "25.4.29661.31031",
+      "publisher": "Microsoft"
+    }
+  ],
+  "idRanges": [
+    {
+      "from": 98900,
+      "to": 99000
+    }
+  ]
+}
