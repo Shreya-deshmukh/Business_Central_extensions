@@ -270,10 +270,10 @@ report 98920 "Quantity on Hand"
     begin
         if EmailAddresses <> '' then begin
             // ── Email path (Job Queue or manual with recipients configured) ───────────
-            // BuildSpreadsheetML reads the ExcelBuf cell records directly and writes
-            // a SpreadsheetML payload into a TempBlob — fully server-side, no
-            // browser or DownloadFromStream required.
-            BuildSpreadsheetML(TempBlobExcel);
+            // BuildXlsx uses ExcelBuf.CreateNewBook / WriteSheet / CloseBook to write
+            // a genuine Open XML (.xlsx) workbook into a TempBlob stream — fully
+            // server-side, no browser or DownloadFromStream required.
+            BuildXlsx(TempBlobExcel);
             if not TempBlobExcel.HasValue() then
                 Error('Failed to generate the report spreadsheet for email delivery.');
             TempBlobExcel.CreateInStream(ExcelInStr);
@@ -579,9 +579,9 @@ report 98920 "Quantity on Hand"
     // ────────────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Builds and dispatches the email carrying the SpreadsheetML attachment.
+    /// Builds and dispatches the email carrying the real .xlsx attachment.
     /// ExcelInStream must already be positioned at the start of the blob data
-    /// (obtained from BuildSpreadsheetML + TempBlob.CreateInStream).
+    /// (obtained from BuildXlsx + TempBlob.CreateInStream).
     /// </summary>
     local procedure SendReportByEmail(var ExcelInStream: InStream)
     var
@@ -606,11 +606,9 @@ report 98920 "Quantity on Hand"
         Body := '<p>Please find attached the Quantity on Hand &amp; Usage Report for ' +
                 CollectionName + ' generated on ' + FormattedDate + '.</p>';
 
-        // FIX 1: Changed extension from .xls → .xml to match the SpreadsheetML
-        // format exactly, eliminating the Excel "file format does not match
-        // extension" warning that .xls would cause.
+        // Real Open XML workbook — true .xlsx, opens in Excel with no warnings.
         FileName := 'QtyOnHandUsageReport_' +
-                    Format(Today, 0, '<Year4><Month,2><Day,2>') + '.xml';
+                    Format(Today, 0, '<Year4><Month,2><Day,2>') + '.xlsx';
 
         // Initialise the message; recipients are added individually below.
         EmailMessage.Create('', Subject, Body, true);
@@ -623,13 +621,11 @@ report 98920 "Quantity on Hand"
         foreach Recipient in Recipients do
             EmailMessage.AddRecipient(Enum::"Email Recipient Type"::"To", Recipient);
 
-        // ── Attach the SpreadsheetML workbook ────────────────────────────────────
-        // FIX 1: MIME type updated to match the .xml extension.
-        // Excel recognises the SpreadsheetML namespace and opens the file natively.
-        EmailMessage.AddAttachment(FileName, 'application/xml', ExcelInStream);
+        // ── Attach the real .xlsx workbook ───────────────────────────────────────
+        // MIME type for Open XML Excel format (.xlsx).
+        EmailMessage.AddAttachment(FileName, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', ExcelInStream);
 
         // ── Send via the configured custom Email Scenario ────────────────────────
-        // FIX 2: Uses the "QOH Report" enum value defined in QOHEmailScenario.AL.
         // IMPORTANT: After deploying, map this scenario to your SMTP account in:
         //   Business Central → Email Accounts → Email Scenarios → QOH Report
         // The Send() call will throw a runtime error if the scenario has no
@@ -638,79 +634,34 @@ report 98920 "Quantity on Hand"
     end;
 
     /// <summary>
-    /// Serialises the ExcelBuf cell records as SpreadsheetML XML into ResultBlob.
-    /// This is entirely server-side: no OpenExcel / DownloadFromStream is called,
-    /// making it safe for Job Queue execution where GuiAllowed() = false.
+    /// Generates a genuine Open XML (.xlsx) workbook into ResultBlob using the
+    /// ExcelBuf table's built-in CreateNewBook / WriteSheet / CloseBook / SaveToStream
+    /// pipeline.  This is entirely server-side — no OpenExcel / DownloadFromStream
+    /// is called — making it safe for Job Queue execution where GuiAllowed() = false.
     ///
-    /// SpreadsheetML is the XML-based Excel format that all Excel versions open
-    /// natively.  Column order, number values, and bold headers are preserved.
-    /// The output is saved as .xml (see SendReportByEmail) to avoid the Excel
-    /// "file format does not match extension" warning that .xls would produce.
+    /// The output is a real .xlsx file (ZIP-based Open XML format), identical to
+    /// what the manual download produces, with no format-mismatch warnings in Excel.
     /// </summary>
-    local procedure BuildSpreadsheetML(var ResultBlob: Codeunit "Temp Blob")
+    local procedure BuildXlsx(var ResultBlob: Codeunit "Temp Blob")
     var
         OutStr: OutStream;
-        CurrRow: Integer;
-        CellType: Text;
-        CellValue: Text;
-        StyleAttr: Text;
-        DecValue: Decimal;
     begin
-        ResultBlob.CreateOutStream(OutStr, TextEncoding::UTF8);
+        // Build the workbook in memory using ExcelBuf's native Open XML engine.
+        // CreateNewBook initialises the in-memory workbook structure.
+        ExcelBuf.CreateNewBook('Quantity on Hand');
 
-        OutStr.WriteText('<?xml version="1.0" encoding="UTF-8"?>');
-        OutStr.WriteText('<?mso-application progid="Excel.Sheet"?>');
-        OutStr.WriteText('<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" ');
-        OutStr.WriteText('xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">');
-        OutStr.WriteText('<Styles>');
-        OutStr.WriteText('<Style ss:ID="sBold"><Font ss:Bold="1"/></Style>');
-        OutStr.WriteText('</Styles>');
-        OutStr.WriteText('<Worksheet ss:Name="Quantity on Hand &amp; Usage"><Table>');
+        // WriteSheet serialises all ExcelBuf rows/cells into the workbook sheet.
+        // This is the same call the manual path uses before OpenExcel — it is
+        // fully server-safe and does not trigger any client callback.
+        ExcelBuf.WriteSheet('Quantity on Hand', CompanyName(), UserId());
 
-        ExcelBuf.Reset();
-        if ExcelBuf.FindSet() then begin
-            CurrRow := 0;
-            repeat
-                if ExcelBuf."Row No." <> CurrRow then begin
-                    if CurrRow > 0 then
-                        OutStr.WriteText('</Row>');
-                    CurrRow := ExcelBuf."Row No.";
-                    OutStr.WriteText('<Row>');
-                end;
+        // CloseBook finalises the Open XML package (writes [Content_Types], rels, etc.).
+        ExcelBuf.CloseBook();
 
-                if ExcelBuf."Cell Type" = ExcelBuf."Cell Type"::Number then begin
-                    CellType := 'Number';
-                    CellValue := ExcelBuf."Cell Value as Text";
-                    DecValue := 0;
-                    if Evaluate(DecValue, CellValue) then
-                        CellValue := Format(DecValue, 0, 9)
-                    else
-                        CellValue := '0';
-                end else begin
-                    CellType := 'String';
-                    CellValue := ExcelBuf."Cell Value as Text";
-                    CellValue := CellValue.Replace('&', '&amp;');
-                    CellValue := CellValue.Replace('<', '&lt;');
-                    CellValue := CellValue.Replace('>', '&gt;');
-                    CellValue := CellValue.Replace('"', '&quot;');
-                end;
-
-                if ExcelBuf.Bold then
-                    StyleAttr := ' ss:StyleID="sBold"'
-                else
-                    StyleAttr := '';
-
-                OutStr.WriteText(
-                    '<Cell' + StyleAttr + '>' +
-                    '<Data ss:Type="' + CellType + '">' + CellValue + '</Data>' +
-                    '</Cell>');
-
-            until ExcelBuf.Next() = 0;
-
-            OutStr.WriteText('</Row>');
-        end;
-
-        OutStr.WriteText('</Table></Worksheet></Workbook>');
+        // SaveToStream writes the completed .xlsx binary into our TempBlob OutStream.
+        // This replaces OpenExcel (which would DownloadFromStream to the browser).
+        ResultBlob.CreateOutStream(OutStr);
+        ExcelBuf.SaveToStream(OutStr, true);
     end;
 
     /// <summary>
