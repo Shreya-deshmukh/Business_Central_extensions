@@ -231,7 +231,21 @@ report 98920 "Quantity on Hand"
     }
 
     trigger OnPreReport()
+    var
+        AutomationCode: Code[50];
+        AutomationName: Text[100];
+        AutomationDisabledErr: Label 'This automation is currently disabled. Enable it from Automation Management.';
+        QOHReportNameWithCollectionLbl: Label 'Quantity On Hand & Usage - %1', Comment = '%1 = collection name (e.g. All or collection code)';
+        CollectionDisplayName: Text[100];
     begin
+        AutomationCode := GetQOHAutomationCode();
+        CollectionDisplayName := GetQOHCollectionDisplayName();
+        AutomationName := StrSubstNo(QOHReportNameWithCollectionLbl, CollectionDisplayName);
+        if not AutomationMgt.IsEnabled(AutomationCode) then
+            Error(AutomationDisabledErr);
+        AutomationMgt.RegisterOrUpdateOnStart(AutomationCode, AutomationName,
+            CopyStr(EmailAddresses, 1, 250), GetQOHEmailSubject(), GetQOHEmailBody());
+
         ExcelBuf.NewRow();
         ExcelBuf.AddColumn('Item No.', false, '', true, false, true, '', ExcelBuf."Cell Type"::Text);
         ExcelBuf.AddColumn('Item Name', false, '', true, false, true, '', ExcelBuf."Cell Type"::Text);
@@ -268,6 +282,7 @@ report 98920 "Quantity on Hand"
         TempBlobExcel: Codeunit "Temp Blob";
         ExcelInStr: InStream;
     begin
+        AutomationMgt.UpdateOnSuccess(GetQOHAutomationCode());
         if EmailAddresses <> '' then begin
             // ── Email path (Job Queue or manual with recipients configured) ───────────
             // BuildXlsx uses ExcelBuf.CreateNewBook / WriteSheet / CloseBook to write
@@ -289,7 +304,51 @@ report 98920 "Quantity on Hand"
         // else: Job Queue run with no recipients configured — exit silently.
     end;
 
+    local procedure GetQOHAutomationCode(): Code[50]
+    begin
+        if SelectedCollection <> '' then
+            exit(CopyStr('QOH-' + SelectedCollection, 1, 50));
+        exit('QOH-ALL');
+    end;
+
+    local procedure GetQOHCollectionDisplayName(): Text[100]
+    begin
+        if SelectedCollection <> '' then
+            exit(SelectedCollection);
+        exit('All');
+    end;
+
+    /// <summary>
+    /// Returns the email subject used for this report run (same as in SendReportByEmail).
+    /// Used to persist on AutomationSetup so the Automation Card reflects current configuration.
+    /// </summary>
+    local procedure GetQOHEmailSubject(): Text[250]
     var
+        CollectionName: Text[100];
+        FormattedDate: Text[30];
+    begin
+        CollectionName := GetQOHCollectionDisplayName();
+        FormattedDate := Format(Today, 0, '<Month Text,3> <Day>, <Year4>');
+        exit(CopyStr('Quantity on Hand & Usage Report - ' + CollectionName + ' - ' + FormattedDate, 1, 250));
+    end;
+
+    /// <summary>
+    /// Returns the email body used for this report run (same as in SendReportByEmail).
+    /// Used to persist on AutomationSetup so the Automation Card reflects current configuration.
+    /// </summary>
+    local procedure GetQOHEmailBody(): Text[2048]
+    var
+        CollectionName: Text[100];
+        FormattedDate: Text[30];
+    begin
+        CollectionName := GetQOHCollectionDisplayName();
+        FormattedDate := Format(Today, 0, '<Month Text,3> <Day>, <Year4>');
+        exit(CopyStr('<p>Please find attached the Quantity on Hand &amp; Usage Report for ' +
+            CollectionName + ' generated on ' + FormattedDate + '.</p>', 1, 2048));
+    end;
+
+    var
+        AutomationMgt: Codeunit AutomationManager;
         TempItemVariant: Record "Item Variant" temporary;
         ExcelBuf: Record "Excel Buffer" temporary;
         VendorName: Text[100];
