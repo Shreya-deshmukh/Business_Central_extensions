@@ -11,18 +11,21 @@ codeunit 98940 AutomationManager
     /// If record exists: sets Status=Running, LastRun, UpdatedAt, increments TotalRunCount, and updates AutomationName.
     /// Optionally pass email configuration to store on the record so the Automation Card reflects current recipients/subject/body.
     /// </summary>
-    procedure RegisterOrUpdateOnStart(AutomationCode: Code[50]; AutomationName: Text[100]; RecipientEmails: Text[250]; EmailTitle: Text[250]; EmailContent: Text[2048])
+    procedure RegisterOrUpdateOnStart(AutomationCode: Code[50]; AutomationName: Text[100]; RecipientEmails: Text[250]; EmailTitle: Text[250]; EmailContent: Text[2048]; JobQueueEntryNo: Integer)
     var
         AutomationSetupRec: Record AutomationSetup;
         Now: DateTime;
     begin
+        // JobQueueEntryNo is passed for traceability / future use.
         Now := CurrentDateTime();
         AutomationSetupRec.SetRange(AutomationCode, AutomationCode);
         if AutomationSetupRec.FindFirst() then begin
+            // Only increment when not already Running (avoids counting the same logical run multiple times)
+            if AutomationSetupRec.Status <> Enum::AutomationStatus::Running then
+                AutomationSetupRec.TotalRunCount := AutomationSetupRec.TotalRunCount + 1;
             AutomationSetupRec.AutomationName := CopyStr(AutomationName, 1, MaxStrLen(AutomationSetupRec.AutomationName));
             AutomationSetupRec.Status := Enum::AutomationStatus::Running;
             AutomationSetupRec.LastRun := Now;
-            AutomationSetupRec.TotalRunCount := AutomationSetupRec.TotalRunCount + 1;
             SetEmailConfigIfProvided(AutomationSetupRec, RecipientEmails, EmailTitle, EmailContent);
             AutomationSetupRec.Modify(true);
         end else begin

@@ -79,6 +79,7 @@ page 98936 AutomationManagement
                     ToolTip = 'Specifies the result of the most recent execution.';
                     Editable = false;
                     StyleExpr = LastRunStatusStyleExpr;
+                    Visible = Rec.TotalRunCount > 0;
                 }
                 field(TotalRunCount; Rec.TotalRunCount)
                 {
@@ -228,6 +229,7 @@ page 98936 AutomationManagement
         AutomationSetupRec.Enabled := true;
         AutomationSetupRec.Status := Enum::AutomationStatus::Running;
         AutomationSetupRec.Modify(true);
+        SetLinkedJobQueueEntryStatus(AutomationSetupRec, true);
         Message(EnabledSuccessLbl, AutomationSetupRec.AutomationName);
         CurrPage.Update(false);
     end;
@@ -239,7 +241,41 @@ page 98936 AutomationManagement
         AutomationSetupRec.Enabled := false;
         AutomationSetupRec.Status := Enum::AutomationStatus::Paused;
         AutomationSetupRec.Modify(true);
+        SetLinkedJobQueueEntryStatus(AutomationSetupRec, false);
         Message(DisabledSuccessLbl, AutomationSetupRec.AutomationName);
         CurrPage.Update(false);
+    end;
+
+    local procedure SetLinkedJobQueueEntryStatus(AutomationSetupRec: Record AutomationSetup; Enabled: Boolean)
+    var
+        JobQueueEntry: Record "Job Queue Entry";
+        AutomationJQMapRec: Record "Automation JQ Map";
+        JobQueueEntryNo: Integer;
+        AutomationCode20: Code[20];
+    begin
+        JobQueueEntryNo := AutomationSetupRec."Job Queue Entry No.";
+
+        // Fallback: if linkage wasn't persisted yet, resolve via Automation JQ Map.
+        if JobQueueEntryNo = 0 then begin
+            if AutomationSetupRec.AutomationCode = '' then
+                exit;
+            AutomationCode20 := CopyStr(AutomationSetupRec.AutomationCode, 1, MaxStrLen(AutomationJQMapRec."Automation Code"));
+            AutomationJQMapRec.SetRange("Automation Code", AutomationCode20);
+            if AutomationJQMapRec.FindFirst() then
+                JobQueueEntryNo := AutomationJQMapRec."Job Queue Entry No.";
+        end;
+
+        if JobQueueEntryNo = 0 then
+            exit;
+
+        if not JobQueueEntry.Get(JobQueueEntryNo) then
+            exit;
+
+        if Enabled then
+            JobQueueEntry.Status := JobQueueEntry.Status::Ready
+        else
+            JobQueueEntry.Status := JobQueueEntry.Status::"On Hold";
+
+        JobQueueEntry.Modify(true);
     end;
 }

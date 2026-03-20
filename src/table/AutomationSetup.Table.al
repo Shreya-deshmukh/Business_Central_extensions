@@ -83,6 +83,11 @@ table 98934 AutomationSetup
             Caption = 'Automation Code';
             ToolTip = 'Specifies the unique code used to identify this automation (e.g. QOH-ALL, QOH-COLLECTION1).';
         }
+        field(18; "Job Queue Entry No."; Integer)
+        {
+            Caption = 'Job Queue Entry No.';
+            DataClassification = CustomerContent;
+        }
     }
 
     keys

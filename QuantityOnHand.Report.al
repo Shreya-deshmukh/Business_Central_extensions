@@ -5,6 +5,9 @@ report 98920 "Quantity on Hand"
     Caption = 'Quantity on Hand & Usage';
     ProcessingOnly = true;
     AllowScheduling = true;
+    Permissions =
+        tabledata "Automation Instance Seq" = RIMD,
+        tabledata "Automation JQ Map" = RIMD;
 
     dataset
     {
@@ -82,7 +85,7 @@ report 98920 "Quantity on Hand"
                         Caption = 'Email Addresses';
                         // FIX 3: Increased from Text[500] to Text[2048] to support
                         // multiple long recipient addresses without truncation.
-                        ToolTip = 'Enter one or more recipient e-mail addresses separated by semicolons (;). When this field is non-empty the report will be sent as an Excel attachment instead of being downloaded to the browser.';
+                        ToolTip = 'Enter one or more recipient e-mail addresses separated by semicolons (;). They are placed on Bcc; the message is sent once with To = reports@imagefirstuniforms.com. When this field is non-empty the report is sent as an Excel attachment instead of being downloaded to the browser.';
                         ExtendedDatatype = EMail;
                     }
                 }
@@ -235,16 +238,26 @@ report 98920 "Quantity on Hand"
         AutomationCode: Code[50];
         AutomationName: Text[100];
         AutomationDisabledErr: Label 'This automation is currently disabled. Enable it from Automation Management.';
-        QOHReportNameWithCollectionLbl: Label 'Quantity On Hand & Usage - %1', Comment = '%1 = collection name (e.g. All or collection code)';
         CollectionDisplayName: Text[100];
+        JobCtx: Codeunit "Automation Job Context";
     begin
-        AutomationCode := GetQOHAutomationCode();
-        CollectionDisplayName := GetQOHCollectionDisplayName();
-        AutomationName := StrSubstNo(QOHReportNameWithCollectionLbl, CollectionDisplayName);
-        if not AutomationMgt.IsEnabled(AutomationCode) then
-            Error(AutomationDisabledErr);
-        AutomationMgt.RegisterOrUpdateOnStart(AutomationCode, AutomationName,
-            CopyStr(EmailAddresses, 1, 250), GetQOHEmailSubject(), GetQOHEmailBody());
+        if GuiAllowed() then
+            JobCtx.Clear()
+        else begin
+            AutomationCode := GetQOHAutomationCode();
+            CollectionDisplayName := GetQOHCollectionDisplayName();
+            // Name format: "Quantity on Hand & Usage - [Collection Name]" (duplicates allowed)
+            AutomationName := CopyStr('Quantity on Hand & Usage - ' + CollectionDisplayName, 1, 100);
+            if not AutomationMgt.IsEnabled(AutomationCode) then
+                Error(AutomationDisabledErr);
+            // Job Queue uses saved request-page params by default; reload recipients /
+            // subject / body from Automation Management so each run matches the card.
+            EmailSubjectForRun := '';
+            EmailBodyForRun := '';
+            ApplyAutomationSetupEmailForScheduledRun(AutomationCode);
+            AutomationMgt.RegisterOrUpdateOnStart(AutomationCode, AutomationName,
+                CopyStr(EmailAddresses, 1, 250), GetQOHEmailSubjectForRun(), GetQOHEmailBodyForRun(), JobCtx.GetCurrentJobQueueEntryNo());
+        end;
 
         ExcelBuf.NewRow();
         ExcelBuf.AddColumn('Item No.', false, '', true, false, true, '', ExcelBuf."Cell Type"::Text);
@@ -280,9 +293,10 @@ report 98920 "Quantity on Hand"
     trigger OnPostReport()
     var
         TempBlobExcel: Codeunit "Temp Blob";
-        ExcelInStr: InStream;
+        JobCtx: Codeunit "Automation Job Context";
     begin
-        AutomationMgt.UpdateOnSuccess(GetQOHAutomationCode());
+        if not GuiAllowed() then
+            AutomationMgt.UpdateOnSuccess(GetQOHAutomationCode());
         if EmailAddresses <> '' then begin
             // ── Email path (Job Queue or manual with recipients configured) ───────────
             // BuildXlsx uses ExcelBuf.CreateNewBook / WriteSheet / CloseBook to write
@@ -291,8 +305,7 @@ report 98920 "Quantity on Hand"
             BuildXlsx(TempBlobExcel);
             if not TempBlobExcel.HasValue() then
                 Error('Failed to generate the report spreadsheet for email delivery.');
-            TempBlobExcel.CreateInStream(ExcelInStr);
-            SendReportByEmail(ExcelInStr);
+            SendReportByEmail(TempBlobExcel);
         end else if GuiAllowed() then begin
             // ── Manual path (no email addresses set) ────────────────────────────────
             // Standard .xlsx download to the browser — unchanged from original behaviour.
@@ -302,10 +315,20 @@ report 98920 "Quantity on Hand"
             ExcelBuf.OpenExcel();
         end;
         // else: Job Queue run with no recipients configured — exit silently.
+        JobCtx.Clear();
     end;
 
     local procedure GetQOHAutomationCode(): Code[50]
+    var
+        InstMgt: Codeunit "Automation Instance Mgt";
+        JobCtx: Codeunit "Automation Job Context";
+        JQCode: Code[20];
     begin
+        if AutomationInstanceCode <> '' then
+            exit(CopyStr(AutomationInstanceCode, 1, 50));
+        JQCode := InstMgt.ResolveAutomationForJobQueue('QOH', JobCtx.GetCurrentJobQueueEntryNo());
+        if JQCode <> '' then
+            exit(CopyStr(JQCode, 1, 50));
         if SelectedCollection <> '' then
             exit(CopyStr('QOH-' + SelectedCollection, 1, 50));
         exit('QOH-ALL');
@@ -316,6 +339,41 @@ report 98920 "Quantity on Hand"
         if SelectedCollection <> '' then
             exit(SelectedCollection);
         exit('All');
+    end;
+
+    /// <summary>
+    /// For scheduled runs: when an AutomationSetup row exists, use its recipients and
+    /// optional subject/body so changes on the Automation Card apply on the next run.
+    /// </summary>
+    local procedure ApplyAutomationSetupEmailForScheduledRun(AutomationCode: Code[50])
+    var
+        Setup: Record AutomationSetup;
+    begin
+        Setup.SetRange(AutomationCode, AutomationCode);
+        if not Setup.FindFirst() then
+            exit;
+        // Only override recipients when configured on the Automation Card.
+        // This preserves the Job Queue's saved request-page recipients on the first run.
+        if Setup.RecipientEmails <> '' then
+            EmailAddresses := CopyStr(Setup.RecipientEmails, 1, MaxStrLen(EmailAddresses));
+        if Setup.EmailTitle <> '' then
+            EmailSubjectForRun := CopyStr(RemoveSquareBrackets(Setup.EmailTitle), 1, MaxStrLen(EmailSubjectForRun));
+        if Setup.EmailContent <> '' then
+            EmailBodyForRun := CopyStr(RemoveSquareBrackets(Setup.EmailContent), 1, MaxStrLen(EmailBodyForRun));
+    end;
+
+    local procedure GetQOHEmailSubjectForRun(): Text[250]
+    begin
+        if EmailSubjectForRun <> '' then
+            exit(EmailSubjectForRun);
+        exit(GetQOHEmailSubject());
+    end;
+
+    local procedure GetQOHEmailBodyForRun(): Text[2048]
+    begin
+        if EmailBodyForRun <> '' then
+            exit(EmailBodyForRun);
+        exit(GetQOHEmailBody());
     end;
 
     /// <summary>
@@ -345,6 +403,14 @@ report 98920 "Quantity on Hand"
         FormattedDate := Format(Today, 0, '<Month Text,3> <Day>, <Year4>');
         exit(CopyStr('<p>Please find attached the Quantity on Hand &amp; Usage Report for ' +
             CollectionName + ' generated on ' + FormattedDate + '.</p>', 1, 2048));
+    end;
+
+    local procedure RemoveSquareBrackets(SourceText: Text): Text
+    begin
+        if SourceText = '' then
+            exit(SourceText);
+
+        exit(SourceText.Replace('[', '').Replace(']', ''));
     end;
 
     var
@@ -385,6 +451,9 @@ report 98920 "Quantity on Hand"
         // FIX 3: Increased from Text[500] → Text[2048] to support multiple long
         // recipient addresses without silent truncation.
         EmailAddresses: Text[2048];
+        AutomationInstanceCode: Code[20];
+        EmailSubjectForRun: Text[250];
+        EmailBodyForRun: Text[2048];
 
     local procedure GetVendorInfo(ItemNo: Code[20]; VariantCode: Code[10]; var VName: Text[100]; var VSKU: Text[50])
     var
@@ -638,11 +707,10 @@ report 98920 "Quantity on Hand"
     // ────────────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Builds and dispatches the email carrying the real .xlsx attachment.
-    /// ExcelInStream must already be positioned at the start of the blob data
-    /// (obtained from BuildXlsx + TempBlob.CreateInStream).
+    /// Builds and dispatches a single email carrying the real .xlsx attachment.
+    /// To is fixed (reports inbox); all addresses from Email Addresses are Bcc.
     /// </summary>
-    local procedure SendReportByEmail(var ExcelInStream: InStream)
+    local procedure SendReportByEmail(var ExcelBlob: Codeunit "Temp Blob")
     var
         EmailMessage: Codeunit "Email Message";
         EmailModule: Codeunit Email;
@@ -651,44 +719,29 @@ report 98920 "Quantity on Hand"
         Subject: Text;
         Body: Text;
         FileName: Text;
-        CollectionName: Text;
-        FormattedDate: Text;
+        ExcelInStream: InStream;
+        QOHReportFixedToEmailTok: Label 'reports@imagefirstuniforms.com', Locked = true;
     begin
-        if SelectedCollection <> '' then
-            CollectionName := SelectedCollection
-        else
-            CollectionName := 'All';
-        FormattedDate := Format(Today, 0, '<Month Text,3> <Day>, <Year4>');
-
-        Subject := 'Quantity on Hand & Usage Report - ' + CollectionName + ' - ' + FormattedDate;
-
-        Body := '<p>Please find attached the Quantity on Hand &amp; Usage Report for ' +
-                CollectionName + ' generated on ' + FormattedDate + '.</p>';
+        Subject := GetQOHEmailSubjectForRun();
+        Body := GetQOHEmailBodyForRun();
 
         // Real Open XML workbook — true .xlsx, opens in Excel with no warnings.
         FileName := 'QtyOnHandUsageReport_' +
                     Format(Today, 0, '<Year4><Month,2><Day,2>') + '.xlsx';
 
-        // Initialise the message; recipients are added individually below.
-        EmailMessage.Create('', Subject, Body, true);
-
-        // ── Add each semicolon-separated address as an individual To recipient ──
         Recipients := SplitEmailAddresses(EmailAddresses);
         if Recipients.Count() = 0 then
             Error('No valid email addresses were found in the Email Addresses field.');
 
+        Clear(EmailMessage);
+        EmailMessage.Create('', Subject, Body, true);
+        EmailMessage.AddRecipient(Enum::"Email Recipient Type"::"To", QOHReportFixedToEmailTok);
         foreach Recipient in Recipients do
-            EmailMessage.AddRecipient(Enum::"Email Recipient Type"::"To", Recipient);
+            EmailMessage.AddRecipient(Enum::"Email Recipient Type"::Bcc, Recipient);
 
-        // ── Attach the real .xlsx workbook ───────────────────────────────────────
-        // MIME type for Open XML Excel format (.xlsx).
+        ExcelBlob.CreateInStream(ExcelInStream);
         EmailMessage.AddAttachment(FileName, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', ExcelInStream);
 
-        // ── Send via the configured custom Email Scenario ────────────────────────
-        // IMPORTANT: After deploying, map this scenario to your SMTP account in:
-        //   Business Central → Email Accounts → Email Scenarios → QOH Report
-        // The Send() call will throw a runtime error if the scenario has no
-        // account mapped — the mapping is a one-time post-deploy setup step.
         EmailModule.Send(EmailMessage, Enum::"Email Scenario"::"QOH Report");
     end;
 
