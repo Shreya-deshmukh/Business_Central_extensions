@@ -61,9 +61,19 @@ table 98934 AutomationSetup
         {
             Caption = 'Status';
         }
-        field(13; RunFrequency; Enum RunFrequency)
+        field(13; RunFrequency; Option)
+        {
+            Caption = 'Run Frequency (Legacy)';
+            OptionMembers = "Not Set",Daily,Weekly,Monthly,Yearly,Custom;
+            OptionCaption = 'Not Set,Daily,Weekly,Monthly,Yearly,Custom';
+            ObsoleteState = Pending;
+            ObsoleteReason = 'Replaced by ScheduleFormula (field 19) which stores the raw date formula text.';
+            ObsoleteTag = '1.3.0';
+        }
+        field(19; ScheduleFormula; Text[20])
         {
             Caption = 'Run Frequency';
+            DataClassification = CustomerContent;
         }
         field(14; LastRunStatus; Enum LastRunStatus)
         {
@@ -86,6 +96,11 @@ table 98934 AutomationSetup
         field(18; "Job Queue Entry No."; Integer)
         {
             Caption = 'Job Queue Entry No.';
+            DataClassification = CustomerContent;
+        }
+        field(20; ScheduledTime; Time)
+        {
+            Caption = 'Scheduled Time';
             DataClassification = CustomerContent;
         }
     }

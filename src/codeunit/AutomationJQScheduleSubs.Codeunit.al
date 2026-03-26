@@ -1,7 +1,7 @@
 codeunit 98947 "Automation JQ Schedule Subs"
 {
     Access = Internal;
-    Permissions = tabledata "Job Queue Entry" = R;
+    Permissions = tabledata "Job Queue Entry" = RM;
 
     [EventSubscriber(ObjectType::Table, Database::"Job Queue Entry", 'OnAfterInsertEvent', '', false, false)]
     local procedure JobQueueEntry_OnAfterInsert(var Rec: Record "Job Queue Entry"; RunTrigger: Boolean)
@@ -31,47 +31,66 @@ codeunit 98947 "Automation JQ Schedule Subs"
         ScheduledRecipients: Text[250];
         CollectionName: Text[100];
         FirstRunDT: DateTime;
-        InferredRunFrequency: Enum RunFrequency;
+        FormulaText: Text[20];
+        ScheduledTime: Time;
     begin
         if JobQueueEntry."Object Type to Run" <> JobQueueEntry."Object Type to Run"::Report then
             exit;
         if JobQueueEntry."Object ID to Run" <> 98920 then
             exit;
 
+        // Resolve AutomationCode first so we can fall back to the persisted ScheduledTime
+        // when the Job Queue Entry no longer carries the time (e.g. after a run BC resets
+        // Earliest Start Date/Time to midnight for formula-based frequencies).
         AutomationCode := CopyStr(InstMgt.ResolveAutomationForJobQueue('QOH', JobQueueEntry."Entry No."), 1, 50);
         if AutomationCode = '' then
             exit;
 
-        // Collection: Parameter String on insert; add GetReportParameters() after modify.
+        ScheduledTime := ResolveScheduleTime(JobQueueEntry, xJobQueueEntry);
+        // If the Job Queue Entry no longer carries a time (post-run reset), fall back to
+        // the time we persisted when the schedule was first created or last known good.
+        if ScheduledTime = 0T then
+            ScheduledTime := GetPersistedScheduledTime(AutomationCode);
+
+        // Fix in-memory ESD so GetEffectiveNextRunDateTime computes the right NextRun.
+        NormalizeJobQueueEarliestStartDateTime(JobQueueEntry, ScheduledTime);
+        // Persist Starting Time on the JQ entry (once, idempotent) so BC's own
+        // scheduler always builds ESD = next_date + ScheduledTime going forward.
+        EnsureJobQueueStartingTime(JobQueueEntry, ScheduledTime);
+
         CollectionName := GetScheduledCollection(JobQueueEntry, FromInsert);
         if CollectionName <> '' then
             AutomationName := CopyStr('Quantity on Hand & Usage - ' + CollectionName, 1, 100)
         else
             AutomationName := 'Quantity on Hand & Usage';
 
-        NextRunDT := JobQueueEntry."Earliest Start Date/Time";
+        NextRunDT := GetEffectiveNextRunDateTime(JobQueueEntry, ScheduledTime);
         FirstRunDT := GetInitialFirstRunDateTime(JobQueueEntry, NextRunDT);
         ScheduledRecipients := GetScheduledRecipients(JobQueueEntry);
+        FormulaText := CopyStr(Format(JobQueueEntry."Next Run Date Formula"), 1, 20);
 
         AutomationSetupRec.SetRange(AutomationCode, AutomationCode);
         if AutomationSetupRec.FindFirst() then begin
-            // Never overwrite a concrete run-resolved name with a generic fallback.
             if (CollectionName <> '') and (AutomationSetupRec.AutomationName <> AutomationName) then
                 AutomationSetupRec.AutomationName := AutomationName;
             if NextRunDT <> 0DT then
-                AutomationSetupRec.NextRun := NextRunDT;
+                AutomationSetupRec.NextRun := ResolveNextRunWithFallbackTime(NextRunDT, AutomationSetupRec.NextRun, ScheduledTime);
+            // Safety net: if NextRun still has midnight time but ScheduledTime is known,
+            // apply the time directly — guards against any fallback chain that missed.
+            if (ScheduledTime <> 0T) and (AutomationSetupRec.NextRun <> 0DT) and
+               (DT2Time(AutomationSetupRec.NextRun) = 0T)
+            then
+                AutomationSetupRec.NextRun := CreateDateTime(DT2Date(AutomationSetupRec.NextRun), ScheduledTime);
             if AutomationSetupRec.FirstRun = 0DT then
                 AutomationSetupRec.FirstRun := FirstRunDT;
-            if AutomationSetupRec.RunFrequency = Enum::RunFrequency::"Not Set" then begin
-                InferredRunFrequency := InferRunFrequencyFromEarliestStartChange(JobQueueEntry, xJobQueueEntry);
-                if InferredRunFrequency <> Enum::RunFrequency::"Not Set" then
-                    AutomationSetupRec.RunFrequency := InferredRunFrequency;
-            end;
-            // Keep user's Enabled/Status choice. Still update the linkage to the concrete Job Queue Entry.
+            // Always sync the raw formula from the Job Queue — this is the authoritative source.
+            if FormulaText <> '' then
+                AutomationSetupRec.ScheduleFormula := FormulaText;
             if (AutomationSetupRec."Job Queue Entry No." = 0) or (AutomationSetupRec."Job Queue Entry No." <> JobQueueEntry."Entry No.") then
                 AutomationSetupRec."Job Queue Entry No." := JobQueueEntry."Entry No.";
-            // Populate initial email config from the scheduled request page, but do not override
-            // values that the user has already set on the Automation Card.
+            // Persist ScheduledTime so future post-run events can always recover it.
+            if (ScheduledTime <> 0T) and (AutomationSetupRec.ScheduledTime <> ScheduledTime) then
+                AutomationSetupRec.ScheduledTime := ScheduledTime;
             ApplyInitialEmailConfigIfBlank(AutomationSetupRec, ScheduledRecipients, CollectionName);
             AutomationSetupRec.Modify(true);
             exit;
@@ -84,12 +103,15 @@ codeunit 98947 "Automation JQ Schedule Subs"
         AutomationSetupRec.Enabled := true;
         AutomationSetupRec.Status := Enum::AutomationStatus::Idle;
         AutomationSetupRec.FirstRun := FirstRunDT;
-        // Frequency can usually only be inferred after Job Queue updates the earliest start time.
-        AutomationSetupRec.RunFrequency := Enum::RunFrequency::"Not Set";
+        AutomationSetupRec.ScheduleFormula := FormulaText;
+        AutomationSetupRec.ScheduledTime := ScheduledTime;
         AutomationSetupRec.TotalRunCount := 0;
         ApplyInitialEmailConfigIfBlank(AutomationSetupRec, ScheduledRecipients, CollectionName);
-        if NextRunDT <> 0DT then
-            AutomationSetupRec.NextRun := NextRunDT;
+        if NextRunDT <> 0DT then begin
+            AutomationSetupRec.NextRun := ResolveNextRunWithFallbackTime(NextRunDT, 0DT, ScheduledTime);
+            if (ScheduledTime <> 0T) and (DT2Time(AutomationSetupRec.NextRun) = 0T) then
+                AutomationSetupRec.NextRun := CreateDateTime(DT2Date(AutomationSetupRec.NextRun), ScheduledTime);
+        end;
         AutomationSetupRec.Insert(true);
     end;
 
@@ -104,29 +126,125 @@ codeunit 98947 "Automation JQ Schedule Subs"
         exit(0DT);
     end;
 
-    local procedure InferRunFrequencyFromEarliestStartChange(NewJobQueueEntry: Record "Job Queue Entry"; OldJobQueueEntry: Record "Job Queue Entry"): Enum RunFrequency
+    local procedure GetEffectiveNextRunDateTime(JobQueueEntry: Record "Job Queue Entry"; ScheduledTime: Time): DateTime
     var
-        NewDT: DateTime;
-        OldDT: DateTime;
-        DaysDiff: Integer;
+        NextRunDT: DateTime;
+        NextDate: Date;
     begin
-        NewDT := NewJobQueueEntry."Earliest Start Date/Time";
-        OldDT := OldJobQueueEntry."Earliest Start Date/Time";
+        NextRunDT := JobQueueEntry."Earliest Start Date/Time";
+        if NextRunDT = 0DT then
+            exit(0DT);
 
-        if (NewDT = 0DT) or (OldDT = 0DT) then
-            exit(Enum::RunFrequency::"Not Set");
+        // Job Queue can persist only the date part in Earliest Start Date/Time for recurrences.
+        // In that case, preserve known schedule time so Automation Next Run remains accurate.
+        if (DT2Time(NextRunDT) = 0T) and (ScheduledTime <> 0T) then begin
+            NextDate := DT2Date(NextRunDT);
+            exit(CreateDateTime(NextDate, ScheduledTime));
+        end;
 
-        DaysDiff := DT2Date(NewDT) - DT2Date(OldDT);
+        exit(NextRunDT);
+    end;
 
-        // Heuristic inference (Job Queue recurrence might shift by a few hours due to time zone/DST).
-        if DaysDiff <= 1 then
-            exit(Enum::RunFrequency::Daily);
-        if (DaysDiff >= 5) and (DaysDiff <= 9) then
-            exit(Enum::RunFrequency::Weekly);
-        if (DaysDiff >= 20) and (DaysDiff <= 45) then
-            exit(Enum::RunFrequency::Monthly);
+    local procedure NormalizeJobQueueEarliestStartDateTime(var JobQueueEntry: Record "Job Queue Entry"; ScheduledTime: Time)
+    begin
+        // Update Earliest Start Date/Time IN MEMORY ONLY so GetEffectiveNextRunDateTime
+        // computes the correct NextRun for AutomationSetup.
+        // DO NOT call Modify here — BC's JQ infrastructure reacts to any ESD change by
+        // recalculating and resetting to midnight, so writing ESD directly triggers a
+        // permanent fight we will always lose on the final write.
+        // The time is persisted durably via EnsureJobQueueStartingTime (Starting Time field)
+        // which BC itself uses when it computes ESD on each future reschedule.
+        if JobQueueEntry."Earliest Start Date/Time" = 0DT then
+            exit;
+        if ScheduledTime = 0T then
+            exit;
+        if DT2Time(JobQueueEntry."Earliest Start Date/Time") <> 0T then
+            exit;
+        JobQueueEntry."Earliest Start Date/Time" :=
+            CreateDateTime(DT2Date(JobQueueEntry."Earliest Start Date/Time"), ScheduledTime);
+    end;
 
-        exit(Enum::RunFrequency::Custom);
+    local procedure EnsureJobQueueStartingTime(var JobQueueEntry: Record "Job Queue Entry"; ScheduledTime: Time)
+    begin
+        // Set Starting Time on the JQ entry once so BC's own scheduler uses it when
+        // computing Earliest Start Date/Time after each run.  This is the correct, durable
+        // way to keep the JQ entry display in sync — BC reads Starting Time and builds
+        // ESD = CalcDate(formula) + Starting Time on every reschedule.
+        // Idempotent: exits if already set to the right time, so the OnAfterModify
+        // triggered by our Modify below will not loop (Starting Time already = ScheduledTime
+        // → exits immediately on the recursive call).
+        if ScheduledTime = 0T then
+            exit;
+        if JobQueueEntry."Starting Time" = ScheduledTime then
+            exit;
+        if JobQueueEntry."Starting Time" <> 0T then
+            exit; // Never override a Starting Time the user set intentionally
+        JobQueueEntry."Starting Time" := ScheduledTime;
+        JobQueueEntry.Modify(true);
+    end;
+
+    local procedure GetPersistedScheduledTime(AutomationCode: Code[50]): Time
+    var
+        AutomationSetupRec: Record AutomationSetup;
+        T: Time;
+    begin
+        AutomationSetupRec.SetRange(AutomationCode, AutomationCode);
+        if not AutomationSetupRec.FindFirst() then
+            exit(0T);
+
+        // Prefer the explicitly stored scheduled time (populated after first run with fix deployed).
+        if AutomationSetupRec.ScheduledTime <> 0T then
+            exit(AutomationSetupRec.ScheduledTime);
+
+        // For records created before the ScheduledTime field existed, derive from FirstRun.
+        // FirstRun is set at initial scheduling from Earliest Start Date/Time and reliably
+        // carries the originally intended time (e.g. 10:23 AM for a 10:23 AM schedule).
+        T := DT2Time(AutomationSetupRec.FirstRun);
+        if T <> 0T then
+            exit(T);
+
+        exit(0T);
+    end;
+
+    local procedure ResolveScheduleTime(JobQueueEntry: Record "Job Queue Entry"; xJobQueueEntry: Record "Job Queue Entry"): Time
+    var
+        ExistingTime: Time;
+    begin
+        if JobQueueEntry."Starting Time" <> 0T then
+            exit(JobQueueEntry."Starting Time");
+
+        ExistingTime := DT2Time(JobQueueEntry."Earliest Start Date/Time");
+        if ExistingTime <> 0T then
+            exit(ExistingTime);
+
+        if xJobQueueEntry."Starting Time" <> 0T then
+            exit(xJobQueueEntry."Starting Time");
+
+        ExistingTime := DT2Time(xJobQueueEntry."Earliest Start Date/Time");
+        if ExistingTime <> 0T then
+            exit(ExistingTime);
+
+        exit(0T);
+    end;
+
+    local procedure ResolveNextRunWithFallbackTime(CandidateNextRun: DateTime; ExistingNextRun: DateTime; ScheduledTime: Time): DateTime
+    var
+        EffectiveTime: Time;
+    begin
+        if CandidateNextRun = 0DT then
+            exit(0DT);
+
+        if DT2Time(CandidateNextRun) <> 0T then
+            exit(CandidateNextRun);
+
+        EffectiveTime := ScheduledTime;
+        if (EffectiveTime = 0T) and (ExistingNextRun <> 0DT) then
+            EffectiveTime := DT2Time(ExistingNextRun);
+
+        if EffectiveTime = 0T then
+            exit(CandidateNextRun);
+
+        exit(CreateDateTime(DT2Date(CandidateNextRun), EffectiveTime));
     end;
 
     local procedure ApplyInitialEmailConfigIfBlank(var AutomationSetupRec: Record AutomationSetup; ScheduledRecipients: Text[250]; CollectionName: Text[100])

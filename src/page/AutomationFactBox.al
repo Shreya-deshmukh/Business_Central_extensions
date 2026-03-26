@@ -49,11 +49,11 @@ page 98939 AutomationFactBox
                 Caption = 'Total Runs';
                 ToolTip = 'Specifies the total number of times this automation has executed.';
             }
-            field(RunFrequencyFB; Rec.RunFrequency)
+            field(ScheduleFormula; Rec.ScheduleFormula)
             {
                 ApplicationArea = All;
                 Caption = 'Frequency';
-                ToolTip = 'Specifies how frequently this automation is scheduled to run.';
+                ToolTip = 'Specifies how frequently this automation is scheduled to run (e.g. 1D, 1W, 1M, 2W).';
             }
             field(EnabledFB; Rec.Enabled)
             {

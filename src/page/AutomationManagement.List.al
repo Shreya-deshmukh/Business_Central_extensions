@@ -44,11 +44,11 @@ page 98936 AutomationManagement
                     ToolTip = 'Specifies whether this automation is currently active.';
                     Editable = false;
                 }
-                field(RunFrequency; Rec.RunFrequency)
+                field(ScheduleFormula; Rec.ScheduleFormula)
                 {
                     ApplicationArea = All;
                     Caption = 'Run Frequency';
-                    ToolTip = 'Specifies how frequently this automation is scheduled to run.';
+                    ToolTip = 'Specifies how frequently this automation is scheduled to run (e.g. 1D, 1W, 1M, 2W).';
                     Editable = false;
                 }
                 field(FirstRun; Rec.FirstRun)
@@ -227,7 +227,7 @@ page 98936 AutomationManagement
         EnabledSuccessLbl: Label 'Automation "%1" has been enabled.', Comment = '%1 = automation name';
     begin
         AutomationSetupRec.Enabled := true;
-        AutomationSetupRec.Status := Enum::AutomationStatus::Running;
+        AutomationSetupRec.Status := Enum::AutomationStatus::Idle;
         AutomationSetupRec.Modify(true);
         SetLinkedJobQueueEntryStatus(AutomationSetupRec, true);
         Message(EnabledSuccessLbl, AutomationSetupRec.AutomationName);
@@ -268,7 +268,8 @@ page 98936 AutomationManagement
         if JobQueueEntryNo = 0 then
             exit;
 
-        if not JobQueueEntry.Get(JobQueueEntryNo) then
+        JobQueueEntry.SetRange("Entry No.", JobQueueEntryNo);
+        if not JobQueueEntry.FindFirst() then
             exit;
 
         if Enabled then

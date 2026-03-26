@@ -43,11 +43,11 @@ page 98937 AutomationCard
                     ToolTip = 'Specifies whether this automation is currently active.';
                     Editable = false;
                 }
-                field(RunFrequency; Rec.RunFrequency)
+                field(ScheduleFormula; Rec.ScheduleFormula)
                 {
                     ApplicationArea = All;
                     Caption = 'Run Frequency';
-                    ToolTip = 'Specifies how frequently this automation is scheduled to run.';
+                    ToolTip = 'Specifies how frequently this automation is scheduled to run (e.g. 1D, 1W, 1M, 2W).';
                     Editable = false;
                 }
                 field(FirstRun; Rec.FirstRun)
@@ -132,7 +132,7 @@ page 98937 AutomationCard
                     trigger OnValidate()
                     begin
                         EnsureDynamicPartsUnchanged(OriginalEmailTitleDisplay, EmailTitleDisplay);
-                        Rec.EmailTitle := CopyStr(RemoveSquareBrackets(EmailTitleDisplay), 1, MaxStrLen(Rec.EmailTitle));
+                        Rec.EmailTitle := CopyStr(ConvertDisplayToStoredValue(EmailTitleDisplay, Rec.EmailTitle), 1, MaxStrLen(Rec.EmailTitle));
                         EmailTitleDisplay := FormatForDisplay(Rec.EmailTitle);
                     end;
                 }
@@ -147,7 +147,7 @@ page 98937 AutomationCard
                     trigger OnValidate()
                     begin
                         EnsureDynamicPartsUnchanged(OriginalEmailContentDisplay, EmailContentDisplay);
-                        Rec.EmailContent := CopyStr(RemoveSquareBrackets(EmailContentDisplay), 1, MaxStrLen(Rec.EmailContent));
+                        Rec.EmailContent := CopyStr(ConvertDisplayToStoredValue(EmailContentDisplay, Rec.EmailContent), 1, MaxStrLen(Rec.EmailContent));
                         EmailContentDisplay := FormatForDisplay(Rec.EmailContent);
                     end;
                 }
@@ -220,8 +220,8 @@ page 98937 AutomationCard
                         exit;
                     EnsureDynamicPartsUnchanged(OriginalEmailTitleDisplay, EmailTitleDisplay);
                     EnsureDynamicPartsUnchanged(OriginalEmailContentDisplay, EmailContentDisplay);
-                    Rec.EmailTitle := CopyStr(RemoveSquareBrackets(EmailTitleDisplay), 1, MaxStrLen(Rec.EmailTitle));
-                    Rec.EmailContent := CopyStr(RemoveSquareBrackets(EmailContentDisplay), 1, MaxStrLen(Rec.EmailContent));
+                    Rec.EmailTitle := CopyStr(ConvertDisplayToStoredValue(EmailTitleDisplay, Rec.EmailTitle), 1, MaxStrLen(Rec.EmailTitle));
+                    Rec.EmailContent := CopyStr(ConvertDisplayToStoredValue(EmailContentDisplay, Rec.EmailContent), 1, MaxStrLen(Rec.EmailContent));
                     if (Rec.RecipientEmails = '') or (Rec.EmailTitle = '') or (Rec.EmailContent = '') then
                         Error(EmptyFieldsLbl);
                     Rec.UpdatedAt := CurrentDateTime();
@@ -270,7 +270,7 @@ page 98937 AutomationCard
                 begin
                     if Confirm(ConfirmEnableLbl, true, Rec.AutomationName) then begin
                         Rec.Enabled := true;
-                        Rec.Status := Enum::AutomationStatus::Running;
+                        Rec.Status := Enum::AutomationStatus::Idle;
                         Rec.Modify(true);
                         SetLinkedJobQueueEntryStatus(Rec, true);
                         CurrPage.Update(false);
@@ -363,7 +363,7 @@ page 98937 AutomationCard
     var
         DisplayText: Text;
         CollectionName: Text[100];
-        FormattedDate: Text[30];
+        DateToken: Text[30];
     begin
         DisplayText := SourceText;
 
@@ -371,10 +371,27 @@ page 98937 AutomationCard
         if CollectionName <> '' then
             DisplayText := AddSquareBracketsAroundToken(DisplayText, CollectionName);
 
-        FormattedDate := Format(Today, 0, '<Month Text,3> <Day>, <Year4>');
-        DisplayText := AddSquareBracketsAroundToken(DisplayText, FormattedDate);
+        DateToken := ExtractQOHFormattedDateToken(DisplayText);
+        if DateToken <> '' then
+            DisplayText := DisplayText.Replace(DateToken, '[DATE]');
 
         exit(DisplayText);
+    end;
+
+    local procedure ConvertDisplayToStoredValue(DisplayText: Text; ExistingStoredText: Text): Text
+    var
+        DateToken: Text[30];
+        ResolvedText: Text;
+    begin
+        ResolvedText := DisplayText;
+        if StrPos(ResolvedText, '[DATE]') > 0 then begin
+            DateToken := ExtractQOHFormattedDateToken(ExistingStoredText);
+            if DateToken = '' then
+                DateToken := Format(Today, 0, '<Month Text,3> <Day>, <Year4>');
+            ResolvedText := ResolvedText.Replace('[DATE]', DateToken);
+        end;
+
+        exit(RemoveSquareBrackets(ResolvedText));
     end;
 
     local procedure ExtractCollectionNameFromAutomationName(): Text[100]
@@ -410,6 +427,87 @@ page 98937 AutomationCard
             exit(SourceText);
 
         exit(SourceText.Replace('[', '').Replace(']', ''));
+    end;
+
+    local procedure ExtractQOHFormattedDateToken(SourceText: Text): Text[30]
+    var
+        MonthAbbrev: array[12] of Text[3];
+        MonthIndex: Integer;
+        MonthPos: Integer;
+        SearchFrom: Integer;
+        Candidate: Text[30];
+    begin
+        if SourceText = '' then
+            exit('');
+
+        MonthAbbrev[1] := 'Jan';
+        MonthAbbrev[2] := 'Feb';
+        MonthAbbrev[3] := 'Mar';
+        MonthAbbrev[4] := 'Apr';
+        MonthAbbrev[5] := 'May';
+        MonthAbbrev[6] := 'Jun';
+        MonthAbbrev[7] := 'Jul';
+        MonthAbbrev[8] := 'Aug';
+        MonthAbbrev[9] := 'Sep';
+        MonthAbbrev[10] := 'Oct';
+        MonthAbbrev[11] := 'Nov';
+        MonthAbbrev[12] := 'Dec';
+
+        for MonthIndex := 1 to ArrayLen(MonthAbbrev) do begin
+            SearchFrom := 1;
+            MonthPos := StrPos(CopyStr(SourceText, SearchFrom), MonthAbbrev[MonthIndex] + ' ');
+            while MonthPos > 0 do begin
+                MonthPos := (SearchFrom - 1) + MonthPos;
+                Candidate := ExtractDateTokenAtPosition(SourceText, MonthPos);
+                if Candidate <> '' then
+                    exit(Candidate);
+
+                SearchFrom := MonthPos + 1;
+                MonthPos := StrPos(CopyStr(SourceText, SearchFrom), MonthAbbrev[MonthIndex] + ' ');
+            end;
+        end;
+
+        exit('');
+    end;
+
+    local procedure ExtractDateTokenAtPosition(SourceText: Text; StartPos: Integer): Text[30]
+    var
+        Pos: Integer;
+        DayDigits: Integer;
+        Ch: Text[1];
+    begin
+        if (StartPos <= 0) or (StrLen(SourceText) < StartPos + 10) then
+            exit('');
+
+        if CopyStr(SourceText, StartPos + 3, 1) <> ' ' then
+            exit('');
+
+        Pos := StartPos + 4;
+        DayDigits := 0;
+        repeat
+            Ch := CopyStr(SourceText, Pos, 1);
+            if StrPos('0123456789', Ch) = 0 then
+                break;
+            DayDigits += 1;
+            Pos += 1;
+        until (DayDigits = 2) or (Pos > StrLen(SourceText));
+
+        if (DayDigits < 1) or (DayDigits > 2) then
+            exit('');
+
+        if CopyStr(SourceText, Pos, 2) <> ', ' then
+            exit('');
+        Pos += 2;
+
+        if StrLen(SourceText) < Pos + 3 then
+            exit('');
+        if (StrPos('0123456789', CopyStr(SourceText, Pos, 1)) = 0) or
+           (StrPos('0123456789', CopyStr(SourceText, Pos + 1, 1)) = 0) or
+           (StrPos('0123456789', CopyStr(SourceText, Pos + 2, 1)) = 0) or
+           (StrPos('0123456789', CopyStr(SourceText, Pos + 3, 1)) = 0) then
+            exit('');
+
+        exit(CopyStr(SourceText, StartPos, (Pos + 3) - StartPos + 1));
     end;
 
     local procedure EnsureDynamicPartsUnchanged(OriginalDisplayText: Text; EditedDisplayText: Text)
@@ -481,7 +579,8 @@ page 98937 AutomationCard
         if JobQueueEntryNo = 0 then
             exit;
 
-        if not JobQueueEntry.Get(JobQueueEntryNo) then
+        JobQueueEntry.SetRange("Entry No.", JobQueueEntryNo);
+        if not JobQueueEntry.FindFirst() then
             exit;
 
         if Enabled then

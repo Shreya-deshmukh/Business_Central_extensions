@@ -73,7 +73,7 @@ codeunit 98940 AutomationManager
         AutomationSetupRec.Status := Enum::AutomationStatus::Idle;
         AutomationSetupRec.LastRun := Now;
         AutomationSetupRec.LastRunStatus := Enum::LastRunStatus::Success;
-        AutomationSetupRec.NextRun := CalcNextRun(AutomationSetupRec.RunFrequency, Now);
+        AutomationSetupRec.NextRun := CalcNextRun(AutomationSetupRec.ScheduleFormula, AutomationSetupRec.ScheduledTime, Now);
         AutomationSetupRec.Modify(true);
 
         InsertRunLogEntry(AutomationSetupRec, Enum::LastRunStatus::Success, '', DurationSeconds);
@@ -116,27 +116,25 @@ codeunit 98940 AutomationManager
         exit(AutomationSetupRec.Enabled);
     end;
 
-    local procedure CalcNextRun(RunFrequency: Enum RunFrequency; LastRun: DateTime): DateTime
+    local procedure CalcNextRun(RunFrequency: Text[20]; ScheduledTime: Time; LastRun: DateTime): DateTime
     var
         NextDate: Date;
         NextTime: Time;
+        Formula: DateFormula;
     begin
-        case RunFrequency of
-            RunFrequency::"Not Set",
-            RunFrequency::Custom:
-                exit(0DT); // No recurrence or custom: Next Run left blank
-            RunFrequency::Daily:
-                NextDate := CalcDate('<1D>', DT2Date(LastRun));
-            RunFrequency::Weekly:
-                NextDate := CalcDate('<1W>', DT2Date(LastRun));
-            RunFrequency::Monthly:
-                NextDate := CalcDate('<1M>', DT2Date(LastRun));
-            else
-                exit(0DT);
+        if RunFrequency = '' then
+            exit(0DT);
+        Evaluate(Formula, '<' + RunFrequency + '>');
+        NextDate := CalcDate(Formula, DT2Date(LastRun));
+        // Use the persisted scheduled time when available so the next run is always
+        // at the intended hour (not the actual execution time which may drift).
+        if ScheduledTime <> 0T then
+            NextTime := ScheduledTime
+        else begin
+            NextTime := DT2Time(LastRun);
+            if NextTime = 0T then
+                NextTime := 000000T;
         end;
-        NextTime := DT2Time(LastRun);
-        if NextTime = 0T then
-            NextTime := 000000T; // midnight
         exit(CreateDateTime(NextDate, NextTime));
     end;
 
